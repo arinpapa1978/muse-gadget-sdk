@@ -59,6 +59,29 @@ static volatile int64_t s_last_ok_us;
 static TaskHandle_t s_task;
 static char s_key[96], s_url[160];
 
+/* ── 세부 화면 (주식·일정 타일을 탭): Worker /api/gadget/detail?kind=… 를 받은 그대로 그림 ── */
+#define DK_STOCK 1
+#define DK_CAL 2
+#define DBODY_CAP (16 * 1024)
+static volatile int s_dreq;                      /* 받아 올 세부 화면 (0 = 없음) */
+static char *s_dbody;                            /* 받은 JSON (PSRAM, s_mtx 로 보호) */
+static int s_dbody_kind;
+static volatile uint32_t s_dver;
+static uint32_t s_dshown;
+static lv_obj_t *s_det;                          /* 열려 있는 세부 화면 (화면 맨 위 층) */
+static int s_det_kind;
+
+/* ── 세부 화면 PIN: 4자리, NVS "home"/"pin". 처음 탭할 때 정하고, 풀면 Muse 얼굴로 돌아갈 때까지(최대 5분) 유지 ── */
+#define PIN_LEN 4
+#define PIN_KEEP_US (5LL * 60 * 1000000)
+#define PIN_TRIES 5
+enum { PIN_VERIFY, PIN_NEW1, PIN_NEW2 };
+static char s_pin[8];
+static int64_t s_unlocked_until, s_pin_lock_until;
+static lv_obj_t *s_pad, *s_pad_title, *s_pad_dots;
+static char s_pin_in[PIN_LEN + 1], s_pin_first[PIN_LEN + 1];
+static int s_pin_mode, s_pin_kind, s_pin_fail;
+
 /* ── 화면 ── */
 static lv_obj_t *s_tv, *s_face, *s_tile[NT], *s_msg[NT];
 /* 주식 */ static lv_obj_t *st_name, *st_pill, *st_pill_l, *st_cd, *st_price, *st_won, *st_chg, *st_chart, *st_base, *st_fv[3], *st_hl;
@@ -178,6 +201,7 @@ static void build_stock(lv_obj_t *t)
     lv_obj_t *r = centered_row(t, 54);
     st_name = lbl(r, F20, 0xFFFFFF, "주식", 0, 0, 0, 0);
     st_pill = lv_obj_create(r); lv_obj_remove_style_all(st_pill); lv_obj_set_size(st_pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(st_pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(st_pill, lv_color_hex(0xFF4D6A), 0); lv_obj_set_style_bg_opa(st_pill, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(st_pill, 12, 0); lv_obj_set_style_pad_hor(st_pill, 9, 0); lv_obj_set_style_pad_ver(st_pill, 2, 0);
     st_pill_l = lbl(st_pill, F16, 0xFFFFFF, "", 0, 0, 0, 0);
@@ -326,16 +350,29 @@ static void render_bus(const home_data_t *d)
     tint(s_tile[2], 0x062A1F);
     if (!d->bus || d->nb == 0) { set_txt(bs_state, "버스 정보 없음"); set_txt(bs_cnt, "-:--"); return; }
     int el = (int)((esp_timer_get_time() - d->at_us) / 1000000), walk = d->walk * 60, k = -1;
-    for (int i = 0; i < d->nb; i++) if (d->b[i].in - el - walk >= -30) { k = i; break; }
+    /* 버스가 정류장을 지나갈 때까지는 그 버스를 보여 줌 (걸어가는 중일 수 있으니). 지나가면 다음 버스 */
+    for (int i = 0; i < d->nb; i++) if (d->b[i].in - el >= -30) { k = i; break; }
     if (k < 0) { set_txt(bs_state, "다음 버스를 기다리는 중"); set_txt(bs_cnt, "-:--"); return; }
-    int leave = d->b[k].in - el - walk; if (leave < 0) leave = 0;
-    uint32_t c = leave > 300 ? 0x2FD49A : leave > 0 ? 0xFFA94D : 0xFF5C5C;
-    set_txt(bs_state, leave > 600 ? "여유 있어요" : leave > 300 ? "곧 준비하세요" : leave > 60 ? "지금 준비하세요" : "지금 나가세요!");
-    set_col(bs_state, c);
-    char b[48]; snprintf(b, sizeof b, "%d:%02d", leave / 60, leave % 60); set_txt(bs_cnt, b);
-    lv_arc_set_value(bs_ring, leave > 1200 ? 1200 : leave);
-    lv_obj_set_style_arc_color(bs_ring, lv_color_hex(c), LV_PART_INDICATOR);
-    snprintf(b, sizeof b, "나가야 할 때까지 (정류장까지 %d분)", d->walk); set_txt(bs_sub, b);
+    int arrive = d->b[k].in - el; if (arrive < 0) arrive = 0;
+    int leave = arrive - walk;
+    char b[48];
+    if (leave > 0) {   /* 아직 집: 나가야 할 때까지 */
+        uint32_t c = leave > 300 ? 0x2FD49A : 0xFFA94D;
+        set_txt(bs_state, leave > 600 ? "여유 있어요" : leave > 300 ? "곧 준비하세요" : leave > 60 ? "지금 준비하세요" : "지금 나가세요!");
+        set_col(bs_state, c);
+        snprintf(b, sizeof b, "%d:%02d", leave / 60, leave % 60); set_txt(bs_cnt, b);
+        lv_arc_set_value(bs_ring, leave > 1200 ? 1200 : leave);
+        lv_obj_set_style_arc_color(bs_ring, lv_color_hex(c), LV_PART_INDICATOR);
+        snprintf(b, sizeof b, "나가야 할 때까지 (정류장까지 %d분)", d->walk); set_txt(bs_sub, b);
+    } else {           /* 나갈 시간은 지남: 버스가 정류장에 올 때까지 */
+        uint32_t c = 0xFF5C5C;
+        set_txt(bs_state, arrive > 0 ? "서두르세요!" : "버스 도착");
+        set_col(bs_state, c);
+        snprintf(b, sizeof b, "%d:%02d", arrive / 60, arrive % 60); set_txt(bs_cnt, b);
+        lv_arc_set_value(bs_ring, arrive > 1200 ? 1200 : arrive);
+        lv_obj_set_style_arc_color(bs_ring, lv_color_hex(c), LV_PART_INDICATOR);
+        set_txt(bs_sub, "버스가 정류장에 올 때까지");
+    }
     for (int i = 0; i < 2; i++) {
         int j = k + i;
         if (j >= d->nb) { lv_obj_add_flag(bs_row[i], LV_OBJ_FLAG_HIDDEN); continue; }
@@ -458,11 +495,38 @@ static void fetch_once(void)
     }
     free(buf); free(tmp);
 }
+static void fetch_detail(int kind)
+{
+    if (!s_key[0] || !s_dbody) return;
+    char url[340]; snprintf(url, sizeof url, "%s/api/gadget/detail?k=%s&kind=%s", s_url, s_key, kind == DK_CAL ? "cal" : "stock");
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 15000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 2048 };
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) return;
+    char *buf = heap_caps_malloc(DBODY_CAP, MALLOC_CAP_SPIRAM); int len = 0, status = 0;
+    if (buf && esp_http_client_open(h, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(h); status = esp_http_client_get_status_code(h);
+        int r; while (len < DBODY_CAP - 1 && (r = esp_http_client_read(h, buf + len, DBODY_CAP - 1 - len)) > 0) len += r;
+    }
+    esp_http_client_close(h); esp_http_client_cleanup(h);
+    if (buf) {
+        buf[len] = 0;
+        if (status != 200 || !len)
+            snprintf(buf, DBODY_CAP, "{\"title\":\"불러오지 못했어요\",\"sub\":\"%s\",\"sections\":[]}",
+                     status == 403 ? "열쇠가 맞지 않아요" : status ? "서버 응답 오류" : "인터넷 연결을 기다리는 중");
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        memcpy(s_dbody, buf, strlen(buf) + 1); s_dbody_kind = kind; s_dver++;
+        xSemaphoreGive(s_mtx);
+        ESP_LOGI(TAG, "detail %d: %d, %d bytes", kind, status, len);
+    }
+    free(buf);
+}
 static void task(void *arg)
 {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60000));
-        if (s_viewing) fetch_once();                        /* 보고 있을 때만 (배터리) */
+        int k = s_dreq;
+        if (k) { s_dreq = 0; fetch_detail(k); }
+        else if (s_viewing) fetch_once();                   /* 보고 있을 때만 (배터리) */
     }
 }
 
@@ -474,6 +538,7 @@ static void load_cfg(void)
     if (nvs_open("home", NVS_READONLY, &n) == ESP_OK) {
         size_t l = sizeof s_key; if (nvs_get_str(n, "key", s_key, &l) != ESP_OK) s_key[0] = 0;
         l = sizeof s_url; if (nvs_get_str(n, "url", s_url, &l) != ESP_OK) snprintf(s_url, sizeof s_url, "%s", CONFIG_HOME_TILES_URL);
+        l = sizeof s_pin; if (nvs_get_str(n, "pin", s_pin, &l) != ESP_OK || strlen(s_pin) != PIN_LEN) s_pin[0] = 0;
         nvs_close(n);
     }
 }
@@ -498,6 +563,13 @@ bool home_tiles_console(const char *line)
         if (strncmp(v, "https://", 8) || strlen(v) >= sizeof s_url || !save_str("url", v)) { printf("@home_url error\n"); fflush(stdout); return true; }
         snprintf(s_url, sizeof s_url, "%s", v); printf("@home_url ok\n"); fflush(stdout); return true;
     }
+    if (!strncmp(line, "home_pin=", 9)) {               /* 빈 값이면 지움 → 다음에 탭할 때 새로 정함 */
+        const char *v = line + 9; size_t l = strlen(v); bool digits = l == PIN_LEN;
+        for (size_t i = 0; digits && i < l; i++) digits = v[i] >= '0' && v[i] <= '9';
+        if ((l && !digits) || !save_str("pin", v)) { printf("@home_pin error\n"); fflush(stdout); return true; }
+        snprintf(s_pin, sizeof s_pin, "%s", v); s_unlocked_until = 0;
+        printf("@home_pin %s\n", l ? "ok" : "cleared"); fflush(stdout); return true;
+    }
     if (!strcmp(line, "home")) {
         printf("@home {\"key\":%s,\"url\":\"%s\",\"ok\":%s}\n", s_key[0] ? "true" : "false", s_url, s_last_ok_us ? "true" : "false"); fflush(stdout);
         if (s_task) { s_viewing = true; xTaskNotifyGive(s_task); }
@@ -506,11 +578,178 @@ bool home_tiles_console(const char *line)
     return false;
 }
 
+/* ── 세부 화면 ── */
+#define DW 340                                   /* 둥근 화면 안쪽 글 폭 */
+static void det_close(void)
+{
+    if (!s_det) return;
+    lv_obj_delete_async(s_det);
+    s_det = NULL; s_det_kind = 0;
+}
+static void det_tap_cb(lv_event_t *e) { (void)e; det_close(); }
+static lv_obj_t *det_lbl(lv_obj_t *p, const lv_font_t *f, uint32_t c, const char *t, int w, lv_text_align_t a)
+{
+    lv_obj_t *l = lv_label_create(p);
+    lv_obj_set_style_text_font(l, f, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
+    lv_label_set_text(l, t);
+    lv_obj_set_width(l, w); lv_obj_set_style_text_align(l, a, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    return l;
+}
+static void det_open(int kind)
+{
+    det_close();
+    s_det = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_det);
+    lv_obj_set_size(s_det, W, W);
+    lv_obj_set_style_bg_color(s_det, lv_color_black(), 0); lv_obj_set_style_bg_opa(s_det, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_det, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_flex_flow(s_det, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_det, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_top(s_det, 64, 0); lv_obj_set_style_pad_bottom(s_det, 96, 0); lv_obj_set_style_pad_row(s_det, 6, 0);
+    lv_obj_set_scroll_dir(s_det, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_det, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(s_det, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_det, det_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    det_lbl(s_det, F20, 0xFFFFFF, kind == DK_CAL ? "일정" : "주식", DW, LV_TEXT_ALIGN_CENTER);
+    det_lbl(s_det, F16, MUTED, "불러오는 중…", DW, LV_TEXT_ALIGN_CENTER);
+    s_det_kind = kind; s_dshown = s_dver;                /* 예전에 받은 것은 그리지 않음 */
+    s_dreq = kind;
+    if (s_task) xTaskNotifyGive(s_task);
+}
+static void det_render(const char *body)
+{
+    cJSON *j = cJSON_Parse(body);
+    if (!j) return;
+    lv_obj_clean(s_det);
+    char t[96]; cp(t, sizeof t, j, "title");
+    det_lbl(s_det, F20, 0xFFFFFF, t, DW, LV_TEXT_ALIGN_CENTER);
+    cp(t, sizeof t, j, "sub");
+    if (t[0]) { char c[12]; cp(c, sizeof c, j, "subc"); det_lbl(s_det, F16, c[0] ? hexcol(c) : MUTED, t, DW, LV_TEXT_ALIGN_CENTER); }
+    const cJSON *sec;
+    cJSON_ArrayForEach(sec, cJSON_GetObjectItem(j, "sections")) {
+        char h[64]; cp(h, sizeof h, sec, "h");
+        lv_obj_t *hl = det_lbl(s_det, F16, 0x9AA0AC, h, DW, LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_pad_top(hl, 10, 0);
+        box(s_det, 0, 0, DW, 1, 0x2A2D34, 0);
+        const cJSON *row;
+        cJSON_ArrayForEach(row, cJSON_GetObjectItem(sec, "rows")) {
+            char k[40], v[160], c[12], who[16];
+            cp(k, sizeof k, row, "k"); cp(v, sizeof v, row, "v"); cp(c, sizeof c, row, "c"); cp(who, sizeof who, row, "who");
+            uint32_t col = c[0] ? hexcol(c) : 0xFFFFFF;
+            lv_obj_t *r = lv_obj_create(s_det);
+            lv_obj_remove_style_all(r);
+            lv_obj_set_size(r, DW, LV_SIZE_CONTENT);
+            lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            if (who[0]) {                                /* 일정: 사람 색 막대 + 시간 + 제목 */
+                box(r, 0, 3, 5, 16, col, 2);
+                lv_obj_t *kl = lbl(r, F16, 0xC8CCD4, k, 12, 0, 96, LV_TEXT_ALIGN_LEFT);
+                (void)kl;
+                lv_obj_t *vl = lbl(r, F16, 0xFFFFFF, v, 112, 0, DW - 112, LV_TEXT_ALIGN_LEFT);
+                lv_label_set_long_mode(vl, LV_LABEL_LONG_WRAP);
+            } else {                                     /* 주식: 항목 + 값 (값에 색) */
+                lbl(r, F16, MUTED, k, 0, 0, 130, LV_TEXT_ALIGN_LEFT);
+                lv_obj_t *vl = lbl(r, F16, col, v, 132, 0, DW - 132, LV_TEXT_ALIGN_RIGHT);
+                lv_label_set_long_mode(vl, LV_LABEL_LONG_WRAP);
+            }
+        }
+    }
+    det_lbl(s_det, F16, 0x6A6E78, "탭하면 닫혀요", DW, LV_TEXT_ALIGN_CENTER);
+    cJSON_Delete(j);
+}
+/* PIN 패드 */
+static void pad_close(void)
+{
+    if (!s_pad) return;
+    lv_obj_delete_async(s_pad);
+    s_pad = NULL;
+}
+static void pad_show(const char *title, uint32_t color)
+{
+    set_txt(s_pad_title, title); set_col(s_pad_title, color);
+    char d[PIN_LEN * 4 + 8] = ""; size_t o = 0;
+    for (int i = 0; i < PIN_LEN; i++) o += snprintf(d + o, sizeof d - o, "%s%s", i ? " " : "", i < (int)strlen(s_pin_in) ? "●" : "○");
+    set_txt(s_pad_dots, d);
+}
+static void pad_done(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_pin_mode == PIN_NEW1) {
+        snprintf(s_pin_first, sizeof s_pin_first, "%s", s_pin_in); s_pin_in[0] = 0;
+        s_pin_mode = PIN_NEW2; pad_show("한 번 더 눌러 주세요", 0xFFFFFF); return;
+    }
+    if (s_pin_mode == PIN_NEW2) {
+        if (strcmp(s_pin_first, s_pin_in)) { s_pin_in[0] = 0; s_pin_mode = PIN_NEW1; pad_show("달라요. 다시 정해 주세요", 0xFF5C5C); return; }
+        if (!save_str("pin", s_pin_in)) { s_pin_in[0] = 0; pad_show("저장하지 못했어요", 0xFF5C5C); return; }
+        snprintf(s_pin, sizeof s_pin, "%s", s_pin_in);
+    } else if (strcmp(s_pin, s_pin_in)) {
+        s_pin_in[0] = 0;
+        if (++s_pin_fail >= PIN_TRIES) { s_pin_fail = 0; s_pin_lock_until = now + 60LL * 1000000; pad_show("1분 뒤에 다시 해 주세요", 0xFF5C5C); return; }
+        char t[48]; snprintf(t, sizeof t, "틀렸어요 (%d/%d)", s_pin_fail, PIN_TRIES); pad_show(t, 0xFF5C5C); return;
+    }
+    s_pin_fail = 0; s_unlocked_until = now + PIN_KEEP_US;
+    int kind = s_pin_kind;
+    pad_close();
+    det_open(kind);
+}
+static void pad_key_cb(lv_event_t *e)
+{
+    lv_obj_t *m = lv_event_get_target(e);
+    const char *k = lv_buttonmatrix_get_button_text(m, lv_buttonmatrix_get_selected_button(m));
+    if (!k || !k[0]) return;
+    if (!strcmp(k, "취소")) { pad_close(); return; }
+    if (esp_timer_get_time() < s_pin_lock_until) { pad_show("1분 뒤에 다시 해 주세요", 0xFF5C5C); return; }
+    size_t n = strlen(s_pin_in);
+    if (!strcmp(k, "지움")) { if (n) s_pin_in[n - 1] = 0; }
+    else if (k[0] >= '0' && k[0] <= '9' && n < PIN_LEN) { s_pin_in[n] = k[0]; s_pin_in[n + 1] = 0; }
+    pad_show(lv_label_get_text(s_pad_title), 0xFFFFFF);
+    if (strlen(s_pin_in) == PIN_LEN) pad_done();
+}
+static void pad_open(int kind)
+{
+    static const char *map[] = { "1", "2", "3", "\n", "4", "5", "6", "\n", "7", "8", "9", "\n", "취소", "0", "지움", "" };
+    pad_close(); det_close();
+    s_pin_kind = kind; s_pin_in[0] = 0;
+    s_pin_mode = s_pin[0] ? PIN_VERIFY : PIN_NEW1;
+    s_pad = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_pad);
+    lv_obj_set_size(s_pad, W, W);
+    lv_obj_set_style_bg_color(s_pad, lv_color_black(), 0); lv_obj_set_style_bg_opa(s_pad, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_pad, LV_RADIUS_CIRCLE, 0);
+    lv_obj_add_flag(s_pad, LV_OBJ_FLAG_CLICKABLE);                 /* 아래 타일로 터치가 새지 않게 */
+    lv_obj_remove_flag(s_pad, LV_OBJ_FLAG_SCROLLABLE);
+    s_pad_title = lbl(s_pad, F20, 0xFFFFFF, "", 0, 58, W, LV_TEXT_ALIGN_CENTER);
+    s_pad_dots = lbl(s_pad, F20, 0xFFFFFF, "", 0, 92, W, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *m = lv_buttonmatrix_create(s_pad);
+    lv_buttonmatrix_set_map(m, map);
+    lv_obj_set_size(m, 270, 292); lv_obj_set_pos(m, (W - 270) / 2, 130);
+    lv_obj_set_style_bg_opa(m, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(m, 0, 0);
+    lv_obj_set_style_pad_all(m, 0, 0); lv_obj_set_style_pad_row(m, 10, 0); lv_obj_set_style_pad_column(m, 14, 0);
+    lv_obj_set_style_bg_color(m, lv_color_hex(0x24262C), LV_PART_ITEMS); lv_obj_set_style_bg_opa(m, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(m, lv_color_hex(0x4A4E58), LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(m, LV_RADIUS_CIRCLE, LV_PART_ITEMS); lv_obj_set_style_border_width(m, 0, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(m, 0, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(m, F20, LV_PART_ITEMS); lv_obj_set_style_text_color(m, lv_color_white(), LV_PART_ITEMS);
+    lv_obj_add_event_cb(m, pad_key_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    pad_show(s_pin_mode == PIN_VERIFY ? "PIN 4자리" : "새 PIN 4자리를 정해 주세요", 0xFFFFFF);
+}
+static void tile_tap_cb(lv_event_t *e)
+{
+    lv_obj_t *t = lv_event_get_target(e);
+    if (!s_key[0]) return;
+    int kind = t == s_tile[3] ? DK_CAL : DK_STOCK;
+    if (s_pin[0] && esp_timer_get_time() < s_unlocked_until) det_open(kind);   /* 방금 풀었음 */
+    else pad_open(kind);
+}
+
 /* ── 타일 바뀜·자동 복귀·주기 갱신 ── */
 static void tile_cb(lv_event_t *e)
 {
     lv_obj_t *a = lv_tileview_get_tile_active(s_tv);
+    det_close(); pad_close();
     bool ours = false; for (int i = 0; i < NT; i++) if (a == s_tile[i]) ours = true;
+    if (!ours) s_unlocked_until = 0;                         /* Muse 얼굴로 돌아가면 다시 잠금 */
     s_viewing = ours;
     if (ours && s_task && (esp_timer_get_time() - s_last_ok_us > 50LL * 1000000 || !s_last_ok_us)) xTaskNotifyGive(s_task);
 }
@@ -520,8 +759,19 @@ static void ui_timer(lv_timer_t *t)
         xSemaphoreTake(s_mtx, portMAX_DELAY); memcpy(s_v, s_d, sizeof *s_v); s_shown = s_ver; xSemaphoreGive(s_mtx);
         render_all();
     } else if (s_viewing && s_v->ok) render_bus(s_v);       /* 1초마다 버스 타이머 */
-    if (s_viewing && lv_display_get_inactive_time(NULL) > CONFIG_HOME_TILES_IDLE_S * 1000)
+    if (s_det && s_dver != s_dshown) {
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        bool mine = s_dbody_kind == s_det_kind;
+        char *copy = mine ? heap_caps_malloc(strlen(s_dbody) + 1, MALLOC_CAP_SPIRAM) : NULL;
+        if (copy) strcpy(copy, s_dbody);
+        s_dshown = s_dver;
+        xSemaphoreGive(s_mtx);
+        if (copy) { det_render(copy); free(copy); }
+    }
+    if (s_viewing && lv_display_get_inactive_time(NULL) > CONFIG_HOME_TILES_IDLE_S * 1000) {
+        det_close(); pad_close(); s_unlocked_until = 0;
         lv_tileview_set_tile(s_tv, s_face, LV_ANIM_ON);
+    }
 }
 
 void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
@@ -530,6 +780,7 @@ void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
     s_mtx = xSemaphoreCreateMutex();
     s_d = heap_caps_calloc(1, sizeof(home_data_t), MALLOC_CAP_SPIRAM);
     s_v = heap_caps_calloc(1, sizeof(home_data_t), MALLOC_CAP_SPIRAM);
+    s_dbody = heap_caps_calloc(1, DBODY_CAP, MALLOC_CAP_SPIRAM);
     load_cfg();
     for (int i = 0; i < NT; i++) {
         s_tile[i] = new_tile(i + 1);
@@ -539,6 +790,8 @@ void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
         lv_obj_set_style_bg_color(s_msg[i], lv_color_black(), 0); lv_obj_set_style_bg_opa(s_msg[i], 200, 0);
         lv_obj_set_style_pad_ver(s_msg[i], 14, 0); lv_obj_set_style_radius(s_msg[i], 16, 0);
     }
+    lv_obj_add_event_cb(s_tile[0], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);   /* 탭하면 세부 화면 */
+    lv_obj_add_event_cb(s_tile[3], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
     render_all();
     lv_obj_add_event_cb(tv, tile_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_timer_create(ui_timer, 1000, NULL);
