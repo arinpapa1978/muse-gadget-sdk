@@ -141,6 +141,9 @@ if(CONFIG_HOMEHUB_VOICE)
     include("voice_board_select.cmake")
 endif()
 
+# 우리 집 정보 타일의 시리얼 명령 (CONFIG_HOME_TILES 일 때만)
+list(APPEND GADGET_REQUIRES home_tiles)
+
 idf_component_register(
     SRCS ${GADGET_SRCS}
     INCLUDE_DIRS "."

@@ -74,6 +74,9 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#if CONFIG_HOME_TILES
+#include "home_tiles.h"   /* 우리 집 목소리: Muse 답변을 Worker 음성으로 */
+#endif
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -270,6 +273,7 @@ struct turn_t {
     /* TTS */
     int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
     bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
+    bool home;               /* 우리 집 목소리: tts_msg 를 home_tts 의 16 kHz 음성으로 */
     uint8_t *mp3;            /* MP3_BUF */
     size_t mp3_len;
     bool mp3_ended;
@@ -1029,6 +1033,12 @@ static void turn_finish(void)
     s_turn.tts_msg = -1;
     s_turn.silent = false;
     s_turn.mp3_len = 0;
+#if CONFIG_HOME_TILES
+    if (s_turn.home) {
+        home_tts_cancel();
+        s_turn.home = false;
+    }
+#endif
 }
 
 static void turn_fail(const char *why)
@@ -1865,6 +1875,23 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
+#if CONFIG_HOME_TILES
+        /* 우리 집 목소리: 스피커가 켜져 있고 열쇠가 있으면 Worker 음성으로 읽어 줌 (안 되면 아래처럼 글자로만) */
+        if (muse_settings_speaker_on() && s_turn.texts) {
+            const char *t = s_turn.texts + i * TEXT_MAX;
+            if (t[0] && home_tts_start(t)) {
+                m.pcm_start = s_turn.pcm_out;
+                m.pcm_frames = (uint32_t)(CAPTION_LEN(t) * MIC_RATE / SPEECH_CHARS_PER_S);
+                m.tts = TTS_ACTIVE;
+                s_turn.tts_msg = i;
+                s_turn.silent = false;
+                s_turn.home = true;
+                ESP_LOGI(TAG, "speaking message %s with home TTS (%u chars)", m.id, (unsigned)m.len);
+                show_reply_start(m);
+                return;
+            }
+        }
+#endif
         m.pcm_start = s_turn.pcm_out;
         /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
          * was kept at reading pace, not stretched over the whole reply's time
@@ -1925,6 +1952,46 @@ static void pace_silently(void)
     }
 }
 
+#if CONFIG_HOME_TILES
+/* 우리 집 목소리: 받아 둔 16 kHz 음성을 답변 버퍼로. 다 받으면 끝, 하나도 못 받으면 글자로만 */
+static void speak_home(void)
+{
+    static uint8_t pcm[1024];
+    msg_t &m = s_turn.msgs[s_turn.tts_msg];
+    while (xStreamBufferSpacesAvailable(s_out) >= sizeof(pcm)) {
+        size_t n = home_tts_read(pcm, sizeof(pcm));
+        if (!n) {
+            break;
+        }
+        if (s_turn.gen == s_gen.load()) {
+            mark(M_AUDIO);
+            xStreamBufferSend(s_out, pcm, n, 0);
+        }
+        s_turn.pcm_out += n / sizeof(int16_t);
+    }
+    uint32_t got = s_turn.pcm_out - m.pcm_start;
+    if (got > m.pcm_frames) {
+        m.pcm_frames = got;                       /* 자막이 말을 따라가게 */
+    }
+    if (home_tts_state() == HOME_TTS_RUNNING) {
+        return;
+    }
+    s_turn.home = false;
+    if (!got) {
+        const char *t = s_turn.texts ? s_turn.texts + s_turn.tts_msg * TEXT_MAX : "";
+        size_t shown = s_turn.texts ? CAPTION_LEN(t) : m.len;
+        ESP_LOGW(TAG, "home TTS failed: showing message %s as text", m.id);
+        m.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
+        s_turn.silent = true;                     /* pace_silently 가 이어서 끝냄 */
+        return;
+    }
+    m.pcm_end = s_turn.pcm_out;
+    m.pcm_frames = got;
+    m.tts = TTS_FINISHED;
+    s_turn.tts_msg = -1;
+}
+#endif
+
 /* Decodes buffered MP3 while the reply buffer has room. */
 static void decode(void)
 {
@@ -1935,6 +2002,12 @@ static void decode(void)
         pace_silently();
         return;
     }
+#if CONFIG_HOME_TILES
+    if (s_turn.home) {
+        speak_home();
+        return;
+    }
+#endif
     /*
      * minimp3 only takes a frame once it can see the next one's header. Given
      * less, it resets and says to skip all of it, which drops speech and clicks.

@@ -67,3 +67,13 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # actually slept, and how long each power lock kept the chip awake.
 CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 CONFIG_PM_PROFILING=y
+
+# ── 우리 집 버전 (Sean) ──
+# 위로 밀면 주식 · 날씨 · 교통 · 일정 (components/home_tiles). 열쇠는 시리얼 ">home_key=…" 로 기기에 저장
+CONFIG_HOME_TILES=y
+# 한국어 자막 (없으면 한글이 네모로 보임)
+CONFIG_MUSE_CJK_FONT=y
+# 말하기 버튼을 짧게 누르면 Muse 와 음성 통화 (목소리로 답함), 길게 누르면 예전처럼 음성 메모
+CONFIG_MUSE_REALTIME_VOICE=y
+# 펌웨어 공간 4 MB → 8 MB (한글 글꼴). NVS·prod_data 자리는 그대로라 페어링·Wi-Fi 유지
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_home.csv"

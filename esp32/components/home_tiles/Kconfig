@@ -1,0 +1,18 @@
+menu "Home tiles (우리 집 정보 화면)"
+    config HOME_TILES
+        bool "Stock, weather, transit and calendar tiles below Muse's face"
+        default n
+        help
+            Swipe up from Muse's face for four tiles fed by the family Worker's
+            /api/gadget. The access key is stored on the device over the serial
+            console (">home_key=..."), never in the firmware.
+    config HOME_TILES_URL
+        string "Worker base URL"
+        depends on HOME_TILES
+        default "https://noopypapa.sunghwan-paeng.workers.dev"
+    config HOME_TILES_IDLE_S
+        int "Go back to Muse after this many idle seconds"
+        depends on HOME_TILES
+        range 10 600
+        default 30
+endmenu

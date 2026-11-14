@@ -43,6 +43,9 @@
 #include "muse_pixel.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
+#if CONFIG_HOME_TILES
+#include "home_tiles.h"   /* 위로 밀면: 주식 · 날씨 · 교통 · 일정 */
+#endif
 #include "muse_state.h"
 #include "muse_text.h"
 #include "muse_wifi.h"
@@ -1186,7 +1189,11 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
+#if CONFIG_HOME_TILES
+        s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT | LV_DIR_BOTTOM);
+#else
         s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+#endif
         /* It never scrolls, but LVGL would size its scrollbars from all its
          * children every time it draws any part of it. */
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
@@ -1195,6 +1202,9 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_face, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
         s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
+#if CONFIG_HOME_TILES
+        home_tiles_create(s_tv, s_face);
+#endif
         lv_obj_add_event_cb(s_tv, tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
         face = s_face;
     }

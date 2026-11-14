@@ -212,6 +212,8 @@ set(muse_priv_requires
     # before Kconfig values exist, so these can't depend on it; only the code does.
     fatfs esp_driver_sdspi sdmmc)
 list(APPEND muse_priv_requires camera)
+# 우리 집 정보 타일 (CONFIG_HOME_TILES 일 때만 소스가 들어감)
+list(APPEND muse_priv_requires home_tiles)
 # The P4 camera's JPEG encoder; Kconfig is not loaded yet when requirements expand.
 if(IDF_TARGET STREQUAL "esp32p4")
     list(APPEND muse_priv_requires esp_driver_jpeg)

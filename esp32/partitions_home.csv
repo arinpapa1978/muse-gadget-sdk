@@ -1,0 +1,9 @@
+# Muse 1.75C 우리 집 버전: 앱 8 MB 두 칸. NVS·otadata·prod_data 위치는 partitions_muse.csv 와 같음
+# Name,   Type, SubType, Offset,   Size,
+nvs,       data, nvs,     0x11000,  0xC000,
+otadata,   data, ota,     0x1D000,  0x2000,
+phy_init,  data, phy,     0x1F000,  0x1000,
+ota_0,     app,  ota_0,   0x20000,  0x800000,
+prod_data, data, 0x40,    0x820000, 0x1000,
+prod_bak,  data, 0x41,    0x821000, 0x1000,
+ota_1,     app,  ota_1,   0x830000, 0x800000,

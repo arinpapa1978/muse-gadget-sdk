@@ -34,6 +34,9 @@
 #include "identity.h"
 #include "noise_control.h"
 #include "sdk_token_console.h"
+#if CONFIG_HOME_TILES
+#include "home_tiles.h"
+#endif
 #include "stack_monitor.h"
 #include "wifi_known.h"
 #include "wifi_mgr.h"
@@ -649,13 +652,21 @@ static void boot_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// 시리얼 명령: 우리 집 정보 열쇠(home_key=…)를 먼저, 아니면 SDK 토큰
+static bool console_hooks(const char *line) {
+#if CONFIG_HOME_TILES
+    if (home_tiles_console(line)) return true;
+#endif
+    return sdk_token_console_command(line);
+}
+
 void muse_glue_start(void) {
     // First, before Link's Wi-Fi, BLE and tunnel and Muse's display take and
     // fragment internal RAM: the CPU's light-sleep retention memory.
     muse_input_power_init();
     s_ready = xEventGroupCreate();
     muse_link_register(&s_ops);
-    muse_input_set_console_hook(sdk_token_console_command);
+    muse_input_set_console_hook(console_hooks);
     muse_ble_set_name(identity_ble_name());
     ble_companion_t companion = {
         .svcs = muse_ble_services(),
