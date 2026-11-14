@@ -1,7 +1,7 @@
 # 우리 집 정보 타일. CONFIG_HOME_TILES 가 꺼져 있으면 아무것도 넣지 않음
 set(srcs)
 if(CONFIG_HOME_TILES)
-    set(srcs "home_tiles.c" "home_tts.c" "fonts/home_kr_16.c" "fonts/home_kr_20.c" "fonts/home_num_26.c" "fonts/home_num_80.c" "fonts/home_num_88l.c")
+    set(srcs "home_tiles.c" "home_tts.c" "fonts/home_kr_16.c" "fonts/home_kr_20.c" "fonts/home_num_26.c" "fonts/home_num_80.c" "fonts/home_num_88l.c" "fonts/muse_kr_28.c")
 endif()
 idf_component_register(
     SRCS ${srcs}

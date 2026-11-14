@@ -58,7 +58,7 @@ if(CONFIG_MUSE_ENABLED)
     list(APPEND srcs "muse_chat_text.c")
     if(CONFIG_MUSE_CJK_FONT_NOTO)
         list(APPEND srcs "fonts/muse_font_cjk_noto_16.c")   # captions' CJK fallback
-    elseif(CONFIG_MUSE_CJK_FONT)
+    elseif(CONFIG_MUSE_CJK_FONT AND NOT CONFIG_HOME_TILES)   # 우리 집 버전은 home_tiles 의 Pretendard 한글
         list(APPEND srcs "fonts/muse_font_cjk_16.c")
     endif()
     if(CONFIG_MUSE_LATIN_FONT)

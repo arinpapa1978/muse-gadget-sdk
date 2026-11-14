@@ -559,7 +559,14 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
     return s_small ? compact : full;
 }
 
-#if CONFIG_MUSE_CJK_FONT_NOTO
+#if CONFIG_HOME_TILES && CONFIG_MUSE_CJK_FONT
+/* 우리 집 버전: 한글은 Unifont 도트 대신 Pretendard (부드러운 4bpp, 자주 쓰는 2,350자).
+ * 16 px 자리에는 home_kr_16, 크게 읽는 답변(2배 확대 자리)에는 muse_kr_28 을 확대 없이 */
+LV_FONT_DECLARE(home_kr_16)
+LV_FONT_DECLARE(muse_kr_28)
+#define CJK_FONT home_kr_16
+#define HOME_KR 1
+#elif CONFIG_MUSE_CJK_FONT_NOTO
 LV_FONT_DECLARE(muse_font_cjk_noto_16)
 #define CJK_FONT muse_font_cjk_noto_16
 #elif CONFIG_MUSE_CJK_FONT
@@ -803,8 +810,32 @@ static void move_muse(int px, int y)
 static int reply_glyph_px(uint32_t letter, uint32_t next)
 {
     int layout = s_page_for >= 0 ? s_page_for : ANSWER_HEARD;
-    return lv_font_get_glyph_width(s_answers[layout].font, letter, next) * s_answers[layout].scale;
+    int px = lv_font_get_glyph_width(s_answers[layout].font, letter, next) * s_answers[layout].scale;
+#if defined(HOME_KR)
+    if (s_answers[layout].scale == 2) {   /* 한글 답변은 muse_kr_28 로 그림: 둘 중 넓은 쪽으로 나눠야 넘치지 않음 */
+        int kr = lv_font_get_glyph_width(&muse_kr_28, letter, next);
+        px = kr > px ? kr : px;
+    }
+#endif
+    return px;
 }
+
+#if defined(HOME_KR)
+static bool s_kr_big;   /* 지금 읽는 답변을 muse_kr_28 로 (확대 없이) 그리는 중 */
+/* 2배 확대 자리의 한글 답변: 도트 글꼴을 2배로 키우는 대신 28 px 글꼴을 그대로 */
+static void home_kr_read(lv_obj_t *lbl, const char *text, int scale, int w)
+{
+    s_kr_big = scale == 2 && muse_text_has_cjk(text);
+    int sc = s_kr_big ? 1 : scale;
+    if (s_kr_big) {
+        lv_obj_set_style_text_font(lbl, &muse_kr_28, 0);
+    }
+    lv_obj_set_style_transform_scale_x(lbl, sc * 256, 0);
+    lv_obj_set_style_transform_scale_y(lbl, sc * 256, 0);
+    lv_obj_set_width(lbl, w / sc);
+    lv_obj_set_style_transform_pivot_x(lbl, w / sc / 2, 0);
+}
+#endif
 
 /* Live captions are a rolling tail, not paged voice-note replies. Keep the
  * latest whole words visible when the larger reading font fills its box. */
@@ -2073,14 +2104,23 @@ static void update_status(muse_mode_t mode, float now)
         if (answer == ANSWER_READ && muse_voice_in_call()) {
             shown = live_caption_tail(shown, &s_answers[answer]);
         }
+#if defined(HOME_KR)
+        if (answer == ANSWER_READ) {
+            home_kr_read(lbl, shown, s_answers[answer].scale, s_answers[answer].w);
+        }
+#endif
         lv_label_set_text(lbl, shown);
         if (answer == ANSWER_READ) {
             const answer_layout_t *l = &s_answers[answer];
+            int rs = l->scale;
+#if defined(HOME_KR)
+            if (s_kr_big) rs = 1;
+#endif
             lv_point_t size;
             const lv_font_t *font = lv_obj_get_style_text_font(lbl, 0);
             lv_text_get_size(&size, shown, font, 0, CAPTION_LINE_SPACE,
-                             l->w / l->scale, LV_TEXT_FLAG_NONE);
-            int height = size.y < l->h / l->scale ? size.y : l->h / l->scale;
+                             l->w / rs, LV_TEXT_FLAG_NONE);
+            int height = size.y < l->h / rs ? size.y : l->h / rs;
             if (height < 1) height = 1;
             lv_obj_set_height(lbl, height);
             lv_obj_set_style_transform_pivot_y(lbl, height / 2, 0);
