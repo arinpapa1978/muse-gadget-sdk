@@ -84,6 +84,7 @@ static int s_pin_mode, s_pin_kind, s_pin_fail;
 
 /* ── 화면 ── */
 static lv_obj_t *s_tv, *s_face, *s_tile[NT], *s_msg[NT];
+static lv_obj_t *s_wrap;                         /* 일정 아래 숨은 빈 타일: 닿으면 바로 Muse 얼굴로 (한 바퀴) */
 /* 주식 */ static lv_obj_t *st_name, *st_pill, *st_pill_l, *st_cd, *st_price, *st_won, *st_chg, *st_chart, *st_base, *st_fv[3], *st_hl;
 static lv_point_precise_t st_pts[64], st_bpts[2];
 /* 날씨 */ static lv_obj_t *wx_icon, *wx_temp, *wx_desc, *wx_hl, *wx_hc[4], *wx_ht[4], *wx_hi[4], *wx_hv[4], *wx_sun;
@@ -131,8 +132,9 @@ static void comma(long v, char *b, size_t n)
 }
 static void dots(lv_obj_t *tile, int idx)            /* 오른쪽 가장자리: 0 = Muse, 1~4 = 우리 */
 {
-    int y0 = W / 2 - (5 * 6 + 4 * 7 + 12) / 2;
-    for (int i = 0, y = y0; i <= NT; i++) {
+    const int cnt = NT + 1;
+    int y0 = W / 2 - (cnt * 6 + (cnt - 1) * 7 + 12) / 2;
+    for (int i = 0, y = y0; i < cnt; i++) {
         bool on = (i == idx);
         box(tile, W - 26, y, 6, on ? 18 : 6, on ? 0xFFFFFF : 0x48484C, 3);
         y += (on ? 18 : 6) + 7;
@@ -178,7 +180,7 @@ static void draw_icon(lv_obj_t *c, const char *k, int s, uint32_t bg)
 /* ── 타일 만들기 ── */
 static lv_obj_t *new_tile(int row)
 {
-    lv_obj_t *t = lv_tileview_add_tile(s_tv, 0, row, row < NT ? (LV_DIR_TOP | LV_DIR_BOTTOM) : LV_DIR_TOP);
+    lv_obj_t *t = lv_tileview_add_tile(s_tv, 0, row, row <= NT ? (LV_DIR_TOP | LV_DIR_BOTTOM) : LV_DIR_TOP);
     lv_obj_set_scrollbar_mode(t, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(t, lv_color_black(), 0); lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
@@ -642,15 +644,15 @@ static void det_render(const char *body)
             lv_obj_remove_style_all(r);
             lv_obj_set_size(r, DW, LV_SIZE_CONTENT);
             lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-            if (who[0]) {                                /* 일정: 사람 색 막대 + 시간 + 제목 */
-                box(r, 0, 3, 5, 16, col, 2);
-                lv_obj_t *kl = lbl(r, F16, 0xC8CCD4, k, 12, 0, 96, LV_TEXT_ALIGN_LEFT);
-                (void)kl;
-                lv_obj_t *vl = lbl(r, F16, 0xFFFFFF, v, 112, 0, DW - 112, LV_TEXT_ALIGN_LEFT);
+            if (who[0]) {                                /* 일정: 사람 색 막대 + 시간(위) + 제목(아래, 크게) */
+                box(r, 0, 4, 6, 44, col, 3);
+                lbl(r, F16, 0xC8CCD4, k, 16, 0, DW - 16, LV_TEXT_ALIGN_LEFT);
+                lv_obj_t *vl = lbl(r, F20, 0xFFFFFF, v, 16, 22, DW - 16, LV_TEXT_ALIGN_LEFT);
                 lv_label_set_long_mode(vl, LV_LABEL_LONG_WRAP);
-            } else {                                     /* 주식: 항목 + 값 (값에 색) */
-                lbl(r, F16, MUTED, k, 0, 0, 130, LV_TEXT_ALIGN_LEFT);
-                lv_obj_t *vl = lbl(r, F16, col, v, 132, 0, DW - 132, LV_TEXT_ALIGN_RIGHT);
+                lv_obj_set_style_pad_bottom(r, 6, 0);
+            } else {                                     /* 주식: 항목 + 값 (값은 크게, 색) */
+                lbl(r, F16, MUTED, k, 0, 4, 120, LV_TEXT_ALIGN_LEFT);
+                lv_obj_t *vl = lbl(r, F20, col, v, 120, 0, DW - 120, LV_TEXT_ALIGN_RIGHT);
                 lv_label_set_long_mode(vl, LV_LABEL_LONG_WRAP);
             }
         }
@@ -748,6 +750,11 @@ static void tile_cb(lv_event_t *e)
 {
     lv_obj_t *a = lv_tileview_get_tile_active(s_tv);
     det_close(); pad_close();
+    if (a == s_wrap) {                                   /* 일정에서 한 번 더 내림 → Muse */
+        s_viewing = false; s_unlocked_until = 0;
+        lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);
+        return;
+    }
     bool ours = false; for (int i = 0; i < NT; i++) if (a == s_tile[i]) ours = true;
     if (!ours) s_unlocked_until = 0;                         /* Muse 얼굴로 돌아가면 다시 잠금 */
     s_viewing = ours;
@@ -792,6 +799,7 @@ void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
     }
     lv_obj_add_event_cb(s_tile[0], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);   /* 탭하면 세부 화면 */
     lv_obj_add_event_cb(s_tile[3], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    s_wrap = new_tile(NT + 1);
     render_all();
     lv_obj_add_event_cb(tv, tile_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_timer_create(ui_timer, 1000, NULL);
