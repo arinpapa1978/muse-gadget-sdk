@@ -351,7 +351,7 @@ static void render_cal(const home_data_t *d)
     tint(s_tile[3], 0x22122A);
     if (!d->cal) return;
     set_txt(cl_dow, d->dow);
-    char b[96]; snprintf(b, sizeof b, "%d", d->day); set_txt(cl_day, b);
+    char b[192]; snprintf(b, sizeof b, "%d", d->day); set_txt(cl_day, b);
     if (d->ne) snprintf(b, sizeof b, "%d월 · 오늘 남은 일정 %d개%s", d->mon, d->ne + d->more, d->more ? "" : "");
     else snprintf(b, sizeof b, "%d월 · 오늘 남은 일정이 없어요", d->mon);
     set_txt(cl_sub, b);
