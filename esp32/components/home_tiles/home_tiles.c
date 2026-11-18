@@ -1,5 +1,5 @@
 // 우리 집 정보 타일 — Muse 휴대용 1.75인치 둥근 AMOLED (466x466)
-//   Muse 얼굴에서 위로 밀면: 1 주식 → 2 날씨 → 3 출근(73번) → 4 귀갓길(레드라인→73번) → 5 일정
+//   Muse 얼굴에서 위로 밀면: 사진(참) → 1 주식 → 2 날씨 → 3 출근(73번) → 4 귀갓길(레드라인→73번) → 5 일정
 //   데이터: Worker /api/gadget?k=<열쇠>. 열쇠는 펌웨어에 넣지 않고 시리얼 ">home_key=…" 로 기기에 저장 (NVS)
 //   화면은 LVGL 타이머(=Muse UI 작업, 잠금 안)에서만 고치고, 받기는 별도 작업이 함
 #include "home_tiles.h"
@@ -87,6 +87,19 @@ static int s_pin_mode, s_pin_kind, s_pin_fail;
 
 /* ── 화면 ── */
 static lv_obj_t *s_tv, *s_face, *s_tile[NT], *s_msg[NT];
+/* ── 사진 한 장 (참): Worker /api/gadget/photo 의 466x466 RGB565. 휴대폰 /photo 페이지에서 올림 ──
+   배터리: 사진 타일을 열 때만 확인(30분에 한 번까지), 바뀌었을 때만 받음. 다른 타일처럼 30초 뒤 얼굴로 */
+#define PHOTO_BYTES (466 * 466 * 2)
+#define PHOTO_RECHECK_US (30LL * 60 * 1000000)
+static lv_obj_t *s_photo_tile, *s_photo_img, *s_photo_msg;
+static lv_image_dsc_t s_photo_dsc[2];               /* 바꿀 때마다 번갈아 (이미지 캐시가 예전 것을 쓰지 않게) */
+static int s_photo_slot;
+static uint8_t *s_photo_px;                      /* 화면이 쓰는 사진 (PSRAM) */
+static uint8_t *volatile s_photo_new;            /* 받기 작업이 막 받은 사진 → 화면이 가져감 */
+static char s_photo_ver[24], s_photo_new_ver[24];
+static volatile bool s_photo_req, s_photo_none;
+static int64_t s_photo_checked_us;
+static volatile bool s_on_photo;                  /* 사진 타일을 보는 중 (받기 작업이 읽음) */
 static lv_obj_t *s_wrap;                         /* 일정 아래 숨은 빈 타일: 닿으면 바로 Muse 얼굴로 (한 바퀴) */
 /* 주식 */ static lv_obj_t *st_name, *st_pill, *st_pill_l, *st_cd, *st_price, *st_won, *st_chg, *st_chart, *st_base, *st_fv[3], *st_hl;
 static lv_point_precise_t st_pts[64], st_bpts[2];
@@ -134,9 +147,9 @@ static void comma(long v, char *b, size_t n)
     for (int i = 0; i < len && o < (int)n - 1; i++) { if (i && (len - i) % 3 == 0 && o < (int)n - 1) b[o++] = ','; b[o++] = t[i]; }
     b[o] = 0;
 }
-static void dots(lv_obj_t *tile, int idx)            /* 오른쪽 가장자리: 0 = Muse, 1~4 = 우리 */
+static void dots(lv_obj_t *tile, int idx)            /* 오른쪽 가장자리: 0 = Muse, 1 = 사진, 2~ = 우리 */
 {
-    const int cnt = NT + 1;
+    const int cnt = NT + 2;
     int y0 = W / 2 - (cnt * 6 + (cnt - 1) * 7 + 12) / 2;
     for (int i = 0, y = y0; i < cnt; i++) {
         bool on = (i == idx);
@@ -184,7 +197,7 @@ static void draw_icon(lv_obj_t *c, const char *k, int s, uint32_t bg)
 /* ── 타일 만들기 ── */
 static lv_obj_t *new_tile(int row)
 {
-    lv_obj_t *t = lv_tileview_add_tile(s_tv, 0, row, row <= NT ? (LV_DIR_TOP | LV_DIR_BOTTOM) : LV_DIR_TOP);
+    lv_obj_t *t = lv_tileview_add_tile(s_tv, 0, row, row <= NT + 1 ? (LV_DIR_TOP | LV_DIR_BOTTOM) : LV_DIR_TOP);
     lv_obj_set_scrollbar_mode(t, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(t, lv_color_black(), 0); lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
@@ -563,7 +576,7 @@ static void fetch_once(void)
 {
     if (!s_key[0]) return;
     char url[320]; snprintf(url, sizeof url, "%s/api/gadget?k=%s", s_url, s_key);
-    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 15000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 2048 };
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 15000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 4608, .buffer_size_tx = 4608 };   /* PSRAM 쪽으로 */
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
     if (!h) return;
     const int cap = 12 * 1024; char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM); int len = 0, status = 0;
@@ -591,7 +604,8 @@ static void fetch_detail(int kind)
 {
     if (!s_key[0] || !s_dbody) return;
     char url[340]; snprintf(url, sizeof url, "%s/api/gadget/detail?k=%s&kind=%s", s_url, s_key, kind == DK_CAL ? "cal" : "stock");
-    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 15000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 2048 };
+    /* 버퍼를 4 KB 보다 크게: 그래야 내부 RAM 대신 PSRAM 에 잡힘 (SPIRAM_MALLOC_ALWAYSINTERNAL=4096) */
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 15000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 4608, .buffer_size_tx = 4608 };
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
     if (!h) return;
     char *buf = heap_caps_malloc(DBODY_CAP, MALLOC_CAP_SPIRAM); int len = 0, status = 0;
@@ -612,13 +626,62 @@ static void fetch_detail(int kind)
     }
     free(buf);
 }
+static int http_get(const char *url, char *buf, int cap)   /* 받은 바이트 수, 실패면 -상태 */
+{
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 20000, .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 4608, .buffer_size_tx = 4608 };
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) return -1;
+    int len = 0, status = 0;
+    if (esp_http_client_open(h, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(h); status = esp_http_client_get_status_code(h);
+        int r; while (status == 200 && len < cap && (r = esp_http_client_read(h, buf + len, cap - len)) > 0) len += r;
+    }
+    esp_http_client_close(h); esp_http_client_cleanup(h);
+    return status == 200 ? len : -(status ? status : 1);
+}
+static void photo_sync(void)                            /* 작은 버전 확인 → 바뀌었을 때만 430 KB 받기 */
+{
+    if (!s_key[0]) return;
+    char url[340], ver[96] = "";
+    snprintf(url, sizeof url, "%s/api/gadget/photo?k=%s&v=1", s_url, s_key);
+    int n = http_get(url, ver, sizeof ver - 1);
+    if (n <= 0) { ESP_LOGW(TAG, "photo version: %d", n); return; }
+    ver[n] = 0;
+    cJSON *j = cJSON_Parse(ver); char v[24] = "";
+    if (j) { cp(v, sizeof v, j, "ver"); cJSON_Delete(j); }
+    s_photo_checked_us = esp_timer_get_time();
+    s_photo_none = !v[0];
+    if (!v[0] || !strcmp(v, s_photo_ver) || s_photo_new) return;
+    uint8_t *buf = heap_caps_malloc(PHOTO_BYTES, MALLOC_CAP_SPIRAM);
+    if (!buf) { ESP_LOGW(TAG, "photo: no PSRAM"); return; }
+    snprintf(url, sizeof url, "%s/api/gadget/photo?k=%s", s_url, s_key);
+    n = http_get(url, (char *)buf, PHOTO_BYTES);
+    if (n != PHOTO_BYTES) { ESP_LOGW(TAG, "photo: got %d bytes", n); free(buf); return; }
+    snprintf(s_photo_new_ver, sizeof s_photo_new_ver, "%s", v);
+    s_photo_new = buf;                                    /* 화면 타이머가 가져가서 바꿔 끼움 */
+    ESP_LOGI(TAG, "photo %s ready", v);
+}
+static volatile bool s_muse_busy;
+static volatile int64_t s_muse_busy_us;
+void home_tiles_set_busy(bool busy)
+{
+    s_muse_busy = busy;
+    if (busy) s_muse_busy_us = esp_timer_get_time();
+    else if (s_task) xTaskNotifyGive(s_task);           /* 대화가 끝나면 미뤄 둔 받기를 바로 */
+}
+static bool muse_busy(void)                             /* 혹시 끝 신호를 놓쳐도 2분 뒤엔 풀림 */
+{
+    return s_muse_busy && esp_timer_get_time() - s_muse_busy_us < 120LL * 1000000;
+}
 static void task(void *arg)
 {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60000));
+        if (muse_busy()) continue;                      /* Muse 와 대화 중: 나중에 */
         int k = s_dreq;
-        if (k) { s_dreq = 0; fetch_detail(k); }
-        else if (s_viewing) fetch_once();                   /* 보고 있을 때만 (배터리) */
+        if (s_photo_req) { s_photo_req = false; photo_sync(); }   /* 사진 타일: 사진만 (다른 정보는 받지 않음) */
+        else if (k) { s_dreq = 0; fetch_detail(k); }
+        else if (s_viewing && !s_on_photo) fetch_once();                   /* 보고 있을 때만 (배터리) */
     }
 }
 
@@ -845,9 +908,16 @@ static void tile_cb(lv_event_t *e)
         lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);
         return;
     }
-    bool ours = false; for (int i = 0; i < NT; i++) if (a == s_tile[i]) ours = true;
+    bool ours = a == s_photo_tile; for (int i = 0; i < NT; i++) if (a == s_tile[i]) ours = true;
     if (!ours) s_unlocked_until = 0;                         /* Muse 얼굴로 돌아가면 다시 잠금 */
     s_viewing = ours;
+    s_on_photo = a == s_photo_tile;
+    if (s_on_photo) {
+        if (s_task && (!s_photo_px || esp_timer_get_time() - s_photo_checked_us > PHOTO_RECHECK_US)) {
+            s_photo_req = true; xTaskNotifyGive(s_task);
+        }
+        return;                                           /* 사진 타일에선 주식·버스 등은 받지 않음 */
+    }
     if (ours && s_task && (esp_timer_get_time() - s_last_ok_us > 50LL * 1000000 || !s_last_ok_us)) xTaskNotifyGive(s_task);
 }
 static void ui_timer(lv_timer_t *t)
@@ -856,6 +926,25 @@ static void ui_timer(lv_timer_t *t)
         xSemaphoreTake(s_mtx, portMAX_DELAY); memcpy(s_v, s_d, sizeof *s_v); s_shown = s_ver; xSemaphoreGive(s_mtx);
         render_all();
     } else if (s_viewing && s_v->ok) { render_bus(s_v); render_ret(s_v); }   /* 1초마다 버스·열차 타이머 */
+    if (s_photo_new) {                                    /* 새 사진 끼우기 */
+        uint8_t *old = s_photo_px;
+        s_photo_px = s_photo_new; s_photo_new = NULL;
+        snprintf(s_photo_ver, sizeof s_photo_ver, "%s", s_photo_new_ver);
+        s_photo_slot ^= 1;
+        lv_image_dsc_t *dsc = &s_photo_dsc[s_photo_slot];
+        memset(dsc, 0, sizeof *dsc);
+        dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+        dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+        dsc->header.w = 466; dsc->header.h = 466; dsc->header.stride = 466 * 2;
+        dsc->data_size = PHOTO_BYTES; dsc->data = s_photo_px;
+        lv_image_set_src(s_photo_img, dsc);
+        lv_obj_invalidate(s_photo_img);
+        lv_obj_remove_flag(s_photo_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_photo_msg, LV_OBJ_FLAG_HIDDEN);
+        free(old);
+    } else if (!s_photo_px && lv_tileview_get_tile_active(s_tv) == s_photo_tile) {
+        set_txt(s_photo_msg, !s_key[0] ? "열쇠를 넣어 주세요" : s_photo_none ? "휴대폰에서 사진을 올려 주세요\n(noopypapa 주소 /photo)" : "사진 불러오는 중…");
+    }
     if (s_det && s_dver != s_dshown) {
         xSemaphoreTake(s_mtx, portMAX_DELAY);
         bool mine = s_dbody_kind == s_det_kind;
@@ -879,18 +968,25 @@ void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
     s_v = heap_caps_calloc(1, sizeof(home_data_t), MALLOC_CAP_SPIRAM);
     s_dbody = heap_caps_calloc(1, DBODY_CAP, MALLOC_CAP_SPIRAM);
     load_cfg();
+    s_photo_tile = new_tile(1);                           /* 얼굴 바로 아래: 사진 */
+    s_photo_img = lv_image_create(s_photo_tile);
+    lv_obj_set_pos(s_photo_img, 0, 0); lv_obj_set_size(s_photo_img, W, W);
+    lv_obj_add_flag(s_photo_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_photo_img, LV_OBJ_FLAG_CLICKABLE);
+    s_photo_msg = lbl(s_photo_tile, F20, 0xC8CCD4, "", 40, 200, W - 80, LV_TEXT_ALIGN_CENTER);
+    dots(s_photo_tile, 1);
     for (int i = 0; i < NT; i++) {
-        s_tile[i] = new_tile(i + 1);
+        s_tile[i] = new_tile(i + 2);
         switch (i) { case T_STOCK: build_stock(s_tile[i]); break; case T_WX: build_weather(s_tile[i]); break;
                      case T_BUS: build_bus(s_tile[i]); break; case T_RET: build_ret(s_tile[i]); break; default: build_cal(s_tile[i]); }
-        dots(s_tile[i], i + 1);
+        dots(s_tile[i], i + 2);
         s_msg[i] = lbl(s_tile[i], F20, 0xFFFFFF, "", 40, 200, W - 80, LV_TEXT_ALIGN_CENTER);
         lv_obj_set_style_bg_color(s_msg[i], lv_color_black(), 0); lv_obj_set_style_bg_opa(s_msg[i], 200, 0);
         lv_obj_set_style_pad_ver(s_msg[i], 14, 0); lv_obj_set_style_radius(s_msg[i], 16, 0);
     }
     lv_obj_add_event_cb(s_tile[T_STOCK], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);   /* 탭하면 세부 화면 */
     lv_obj_add_event_cb(s_tile[T_CAL], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
-    s_wrap = new_tile(NT + 1);
+    s_wrap = new_tile(NT + 2);
     render_all();
     lv_obj_add_event_cb(tv, tile_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_timer_create(ui_timer, 1000, NULL);

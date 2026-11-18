@@ -16,6 +16,8 @@ bool home_tts_start(const char *text);           // 열쇠가 없으면 false (�
 size_t home_tts_read(uint8_t *out, size_t cap);  // 받아 둔 음성 꺼내기 (기다리지 않음, 짝수 바이트)
 int home_tts_state(void);                        // 받는 중이거나 남은 음성이 있으면 RUNNING
 void home_tts_cancel(void);
+// Muse 대화 중이면 true: 그동안 타일 데이터를 받지 않음 (TLS 연결이 겹쳐 내부 메모리가 바닥나지 않게)
+void home_tiles_set_busy(bool busy);
 // 시리얼 명령 ("home_key=…", "home_url=…", "home"): 처리했으면 true
 bool home_tiles_console(const char *line);
 #ifdef __cplusplus

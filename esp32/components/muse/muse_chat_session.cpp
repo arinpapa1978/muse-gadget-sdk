@@ -1038,6 +1038,7 @@ static void turn_finish(void)
         home_tts_cancel();
         s_turn.home = false;
     }
+    home_tiles_set_busy(false);
 #endif
 }
 
@@ -1065,6 +1066,9 @@ static void turn_done(bool complete)
 /* Ends any turn in progress and starts a fresh one. False if Hatch can't be reached. */
 static bool turn_start(uint32_t gen, bool text)
 {
+#if CONFIG_HOME_TILES
+    home_tiles_set_busy(true);   /* 대화 동안 타일 데이터 받기를 멈춤 (내부 메모리 여유) */
+#endif
     if (s_turn.phase != P_IDLE) {
         if (s_turn.text) {
             turn_fail("INTERRUPTED");

@@ -59,7 +59,7 @@ static void fetch(uint32_t job)
     if (!load(url, sizeof url, key, sizeof key)) { s_state = HOME_TTS_FAILED; return; }
     char full[448]; snprintf(full, sizeof full, "%s/api/gadget/tts?k=%s", url, key);
     esp_http_client_config_t cfg = { .url = full, .method = HTTP_METHOD_POST, .timeout_ms = 20000,
-                                     .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 2048 };
+                                     .crt_bundle_attach = esp_crt_bundle_attach, .buffer_size = 4608, .buffer_size_tx = 4608 };   /* 4 KB 넘게: PSRAM 에 잡힘 */
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
     if (!h) { s_state = HOME_TTS_FAILED; return; }
     esp_http_client_set_header(h, "Content-Type", "text/plain; charset=utf-8");
