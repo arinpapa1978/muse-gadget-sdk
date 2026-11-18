@@ -1,5 +1,5 @@
 // 우리 집 정보 타일 — Muse 휴대용 1.75인치 둥근 AMOLED (466x466)
-//   Muse 얼굴에서 위로 밀면: 1 주식 → 2 날씨 → 3 교통(73번) → 4 일정
+//   Muse 얼굴에서 위로 밀면: 1 주식 → 2 날씨 → 3 출근(73번) → 4 귀갓길(레드라인→73번) → 5 일정
 //   데이터: Worker /api/gadget?k=<열쇠>. 열쇠는 펌웨어에 넣지 않고 시리얼 ">home_key=…" 로 기기에 저장 (NVS)
 //   화면은 LVGL 타이머(=Muse UI 작업, 잠금 안)에서만 고치고, 받기는 별도 작업이 함
 #include "home_tiles.h"
@@ -32,7 +32,8 @@ LV_FONT_DECLARE(home_num_88l);
 #define N80 (&home_num_80)
 #define N88 (&home_num_88l)
 #define W 466
-#define NT 4                                   /* 우리 타일 수 */
+#define NT 5                                   /* 우리 타일 수 */
+enum { T_STOCK, T_WX, T_BUS, T_RET, T_CAL };     /* 타일 순서 */
 #define UP 0xFF5C76
 #define DOWN 0x5AA2FF
 #define MUTED 0x8A8F9C
@@ -41,12 +42,14 @@ LV_FONT_DECLARE(home_num_88l);
 typedef struct { char t[12], icon[16]; int temp; } hour_t;
 typedef struct { char title[64], time[48], who[16]; uint32_t color; } ev_t;
 typedef struct { int in; char at[8]; bool live; } bus_t;
+typedef struct { int tin, bin; char tat[8], bat[8]; } trip_t;   /* 켄달 열차 → 하버드 73번 */
 typedef struct {
-    bool ok, stock, wx, bus, cal;
+    bool ok, stock, wx, bus, cal, ret;
     /* 주식 */ char name[32], status[16], cd[48]; long price, chg, hi, lo, prev; double pct; int np; int px[64]; long py[64];
                bool flow; long fi, ff, fo;
     /* 날씨 */ int temp, feels, hi_t, lo_t, rain; char desc[32], icon[16], sunset[24]; int nh; hour_t h[4];
     /* 교통 */ char route[8]; int walk, nb; bus_t b[3]; int64_t at_us;
+    /* 귀갓길 */ int rwalk, rride, rxfer, nr; trip_t r[3];
     /* 일정 */ char dow[16]; int day, mon, ne, more; ev_t e[3]; bool tm; char tm_title[64], tm_time[24];
     char err[64];
 } home_data_t;
@@ -89,6 +92,7 @@ static lv_obj_t *s_wrap;                         /* 일정 아래 숨은 빈 타
 static lv_point_precise_t st_pts[64], st_bpts[2];
 /* 날씨 */ static lv_obj_t *wx_icon, *wx_temp, *wx_desc, *wx_hl, *wx_hc[4], *wx_ht[4], *wx_hi[4], *wx_hv[4], *wx_sun;
 /* 교통 */ static lv_obj_t *bs_ring, *bs_route, *bs_state, *bs_cnt, *bs_sub, *bs_row[2], *bs_rt[2], *bs_rm[2], *bs_foot;
+/* 귀갓길 */ static lv_obj_t *rt_ring, *rt_state, *rt_cnt, *rt_sub, *rt_row[2], *rt_rt[2], *rt_rm[2], *rt_foot;
 /* 일정 */ static lv_obj_t *cl_dow, *cl_day, *cl_sub, *cl_row[3], *cl_bar[3], *cl_t[3], *cl_s[3], *cl_tm;
 
 static lv_obj_t *lbl(lv_obj_t *p, const lv_font_t *f, uint32_t c, const char *t, int x, int y, int w, lv_text_align_t a)
@@ -270,6 +274,39 @@ static void build_bus(lv_obj_t *t)
     }
     bs_foot = lbl(t, F16, 0x6A6E78, "", 0, 400, W, LV_TEXT_ALIGN_CENTER);
 }
+static void build_ret(lv_obj_t *t)                  /* 귀갓길: 사무실 → 켄달 → (레드라인) → 하버드 → 73번 */
+{
+    rt_ring = lv_arc_create(t);
+    lv_obj_set_size(rt_ring, W - 18, W - 18); lv_obj_center(rt_ring);
+    lv_arc_set_rotation(rt_ring, 270); lv_arc_set_bg_angles(rt_ring, 0, 360); lv_arc_set_range(rt_ring, 0, 1200); lv_arc_set_value(rt_ring, 0);
+    lv_obj_remove_style(rt_ring, NULL, LV_PART_KNOB); lv_obj_remove_flag(rt_ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(rt_ring, 12, LV_PART_MAIN); lv_obj_set_style_arc_width(rt_ring, 12, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(rt_ring, lv_color_hex(0x1A1C20), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(rt_ring, lv_color_hex(0x2FD49A), LV_PART_INDICATOR); lv_obj_set_style_arc_rounded(rt_ring, true, LV_PART_INDICATOR);
+    lv_obj_t *r = centered_row(t, 66);
+    lv_obj_t *p1 = lv_obj_create(r); lv_obj_remove_style_all(p1); lv_obj_set_size(p1, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(p1, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(p1, lv_color_hex(0xDA291C), 0); lv_obj_set_style_bg_opa(p1, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(p1, 7, 0); lv_obj_set_style_pad_hor(p1, 8, 0); lv_obj_set_style_pad_ver(p1, 2, 0);
+    lbl(p1, F16, 0xFFFFFF, "Red", 0, 0, 0, 0);
+    lbl(r, F16, 0xC8CCD4, "→", 0, 0, 0, 0);
+    lv_obj_t *p2 = lv_obj_create(r); lv_obj_remove_style_all(p2); lv_obj_set_size(p2, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(p2, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(p2, lv_color_hex(0xFFD23F), 0); lv_obj_set_style_bg_opa(p2, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(p2, 7, 0); lv_obj_set_style_pad_hor(p2, 8, 0); lv_obj_set_style_pad_ver(p2, 2, 0);
+    lbl(p2, F16, 0x1A1A1A, "73", 0, 0, 0, 0);
+    lbl(r, F16, 0xC8CCD4, "Kendall → Waverley", 0, 0, 0, 0);
+    rt_state = lbl(t, F20, 0x2FD49A, "", 0, 106, W, LV_TEXT_ALIGN_CENTER);
+    rt_cnt = lbl(t, N80, 0xFFFFFF, "-:--", 0, 136, W, LV_TEXT_ALIGN_CENTER);
+    rt_sub = lbl(t, F16, MUTED, "", 0, 240, W, LV_TEXT_ALIGN_CENTER);
+    for (int i = 0; i < 2; i++) {
+        rt_row[i] = box(t, 80, 278 + i * 50, W - 160, 42, i ? 0x000000 : 0x3A1214, 12);
+        if (i) lv_obj_set_style_bg_opa(rt_row[i], LV_OPA_TRANSP, 0);
+        rt_rt[i] = lbl(rt_row[i], F20, i ? 0xC8CCD4 : 0xFFFFFF, "", 14, 9, 0, 0);
+        rt_rm[i] = lbl(rt_row[i], F20, i ? MUTED : 0xFF8A80, "", 0, 9, W - 160 - 14, LV_TEXT_ALIGN_RIGHT);
+    }
+    rt_foot = lbl(t, F16, 0x6A6E78, "", 60, 400, W - 120, LV_TEXT_ALIGN_CENTER);
+}
 static void build_cal(lv_obj_t *t)
 {
     cl_dow = lbl(t, F16, 0xFF6B6B, "", 0, 46, W, LV_TEXT_ALIGN_CENTER);
@@ -290,7 +327,7 @@ static void render_stock(const home_data_t *d)
 {
     if (!d->stock) return;
     bool up = d->chg > 0, down = d->chg < 0; uint32_t c = up ? UP : down ? DOWN : 0xFFFFFF;
-    tint(s_tile[0], up ? 0x2A0A12 : down ? 0x0A1830 : 0x15161A);
+    tint(s_tile[T_STOCK], up ? 0x2A0A12 : down ? 0x0A1830 : 0x15161A);
     set_txt(st_name, d->name);
     set_txt(st_pill_l, d->status);
     lv_obj_set_style_bg_color(st_pill, lv_color_hex(!strcmp(d->status, "본장") ? 0xFF4D6A : 0x3A3D46), 0);
@@ -329,7 +366,7 @@ static void render_weather(const home_data_t *d)
     if (!d->wx) return;
     bool night = strstr(d->icon, "moon") || strstr(d->icon, "night");
     uint32_t bg = night ? 0x0A1426 : 0x1E3A66;
-    tint(s_tile[1], bg);
+    tint(s_tile[T_WX], bg);
     draw_icon(wx_icon, d->icon, 80, bg);
     char b[64]; snprintf(b, sizeof b, "%d°", d->temp); set_txt(wx_temp, b);
     snprintf(b, sizeof b, "%s · 체감 %d°", d->desc, d->feels); set_txt(wx_desc, b);
@@ -349,7 +386,7 @@ static void hm12(const char *at, char *o, size_t n)      /* "14:39" → "2:39" *
 }
 static void render_bus(const home_data_t *d)
 {
-    tint(s_tile[2], 0x062A1F);
+    tint(s_tile[T_BUS], 0x062A1F);
     if (!d->bus || d->nb == 0) { set_txt(bs_state, "버스 정보 없음"); set_txt(bs_cnt, "-:--"); return; }
     int el = (int)((esp_timer_get_time() - d->at_us) / 1000000), walk = d->walk * 60, k = -1;
     /* 버스가 정류장을 지나갈 때까지는 그 버스를 보여 줌 (걸어가는 중일 수 있으니). 지나가면 다음 버스 */
@@ -385,9 +422,52 @@ static void render_bus(const home_data_t *d)
     }
     set_txt(bs_foot, d->b[k].live ? "● 실시간 위치 기준" : "○ 시간표 기준");
 }
+static void render_ret(const home_data_t *d)
+{
+    tint(s_tile[T_RET], 0x2A0B0D);
+    if (!d->ret || d->nr == 0) {
+        set_txt(rt_state, "열차·버스 정보 없음"); set_txt(rt_cnt, "-:--"); set_txt(rt_sub, "");
+        for (int i = 0; i < 2; i++) lv_obj_add_flag(rt_row[i], LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    int el = (int)((esp_timer_get_time() - d->at_us) / 1000000), walk = d->rwalk * 60, k = -1;
+    /* 켄달에서 열차가 떠날 때까지는 그 열차를 보여 줌 (걸어가는 중일 수 있으니). 떠나면 다음 */
+    for (int i = 0; i < d->nr; i++) if (d->r[i].tin - el >= -30) { k = i; break; }
+    if (k < 0) { set_txt(rt_state, "다음 열차를 기다리는 중"); set_txt(rt_cnt, "-:--"); return; }
+    int train = d->r[k].tin - el; if (train < 0) train = 0;
+    int leave = train - walk;
+    char b[64];
+    if (leave > 0) {   /* 아직 사무실: 나가야 할 때까지 */
+        uint32_t c = leave > 300 ? 0x2FD49A : 0xFFA94D;
+        set_txt(rt_state, leave > 600 ? "여유 있어요" : leave > 300 ? "곧 준비하세요" : leave > 60 ? "지금 준비하세요" : "지금 나가세요!");
+        set_col(rt_state, c);
+        snprintf(b, sizeof b, "%d:%02d", leave / 60, leave % 60); set_txt(rt_cnt, b);
+        lv_arc_set_value(rt_ring, leave > 1200 ? 1200 : leave);
+        lv_obj_set_style_arc_color(rt_ring, lv_color_hex(c), LV_PART_INDICATOR);
+        snprintf(b, sizeof b, "사무실에서 나갈 때까지 (켄달역 %d분)", d->rwalk); set_txt(rt_sub, b);
+    } else {           /* 나갈 시간은 지남: 열차가 켄달을 떠날 때까지 */
+        set_txt(rt_state, train > 0 ? "서두르세요!" : "열차 출발");
+        set_col(rt_state, 0xFF5C5C);
+        snprintf(b, sizeof b, "%d:%02d", train / 60, train % 60); set_txt(rt_cnt, b);
+        lv_arc_set_value(rt_ring, train > 1200 ? 1200 : train);
+        lv_obj_set_style_arc_color(rt_ring, lv_color_hex(0xFF5C5C), LV_PART_INDICATOR);
+        set_txt(rt_sub, "켄달에서 열차가 떠날 때까지");
+    }
+    for (int i = 0; i < 2; i++) {                    /* 켄달 열차 → 하버드 73번, 몇 분 뒤 나가면 되는지 */
+        int j = k + i;
+        if (j >= d->nr) { lv_obj_add_flag(rt_row[i], LV_OBJ_FLAG_HIDDEN); continue; }
+        lv_obj_remove_flag(rt_row[i], LV_OBJ_FLAG_HIDDEN);
+        char t1[12], t2[12]; hm12(d->r[j].tat, t1, sizeof t1); hm12(d->r[j].bat, t2, sizeof t2);
+        snprintf(b, sizeof b, "%s → %s", t1, t2); set_txt(rt_rt[i], b);
+        int mins = (d->r[j].tin - el - walk) / 60;
+        if (mins > 0) snprintf(b, sizeof b, "%d분 뒤", mins); else snprintf(b, sizeof b, "지금");
+        set_txt(rt_rm[i], b);
+    }
+    snprintf(b, sizeof b, "켄달 열차 → 73번 · 레드라인 %d분 + 환승 %d분", d->rride, d->rxfer); set_txt(rt_foot, b);
+}
 static void render_cal(const home_data_t *d)
 {
-    tint(s_tile[3], 0x22122A);
+    tint(s_tile[T_CAL], 0x22122A);
     if (!d->cal) return;
     set_txt(cl_dow, d->dow);
     char b[192]; snprintf(b, sizeof b, "%d", d->day); set_txt(cl_day, b);
@@ -414,7 +494,7 @@ static void render_all(void)
         if (m[0]) lv_obj_remove_flag(s_msg[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_msg[i], LV_OBJ_FLAG_HIDDEN);
     }
     if (!s_v->ok) return;
-    render_stock(s_v); render_weather(s_v); render_bus(s_v); render_cal(s_v);
+    render_stock(s_v); render_weather(s_v); render_bus(s_v); render_ret(s_v); render_cal(s_v);
 }
 
 /* ── 받기 ── */
@@ -455,6 +535,16 @@ static void parse(const char *body, home_data_t *d)
             bus_t *x = &d->b[d->nb++]; x->in = num(it, "in"); cp(x->at, sizeof x->at, it, "at"); x->live = cJSON_IsTrue(cJSON_GetObjectItem(it, "live"));
         }
     }
+    const cJSON *rt = cJSON_GetObjectItem(j, "ret");
+    if (cJSON_IsObject(rt)) {
+        d->ret = true; d->rwalk = num(rt, "walk"); d->rride = num(rt, "ride"); d->rxfer = num(rt, "xfer");
+        if (!d->at_us) d->at_us = esp_timer_get_time();
+        const cJSON *it; cJSON_ArrayForEach(it, cJSON_GetObjectItem(rt, "plans")) {
+            if (d->nr >= 3) break;
+            trip_t *x = &d->r[d->nr++]; x->tin = num(it, "tin"); x->bin = num(it, "bin");
+            cp(x->tat, sizeof x->tat, it, "tat"); cp(x->bat, sizeof x->bat, it, "bat");
+        }
+    }
     const cJSON *c = cJSON_GetObjectItem(j, "cal");
     if (cJSON_IsObject(c)) {
         d->cal = true; cp(d->dow, sizeof d->dow, c, "dow"); d->day = num(c, "day"); d->mon = num(c, "mon"); d->more = num(c, "more");
@@ -466,7 +556,7 @@ static void parse(const char *body, home_data_t *d)
         const cJSON *tm = cJSON_GetObjectItem(c, "tomorrow");
         if (cJSON_IsObject(tm)) { d->tm = true; cp(d->tm_title, sizeof d->tm_title, tm, "title"); cp(d->tm_time, sizeof d->tm_time, tm, "time"); }
     }
-    d->ok = d->stock || d->wx || d->bus || d->cal;
+    d->ok = d->stock || d->wx || d->bus || d->ret || d->cal;
     cJSON_Delete(j);
 }
 static void fetch_once(void)
@@ -740,7 +830,7 @@ static void tile_tap_cb(lv_event_t *e)
 {
     lv_obj_t *t = lv_event_get_target(e);
     if (!s_key[0]) return;
-    int kind = t == s_tile[3] ? DK_CAL : DK_STOCK;
+    int kind = t == s_tile[T_CAL] ? DK_CAL : DK_STOCK;
     if (s_pin[0] && esp_timer_get_time() < s_unlocked_until) det_open(kind);   /* 방금 풀었음 */
     else pad_open(kind);
 }
@@ -765,7 +855,7 @@ static void ui_timer(lv_timer_t *t)
     if (s_ver != s_shown) {
         xSemaphoreTake(s_mtx, portMAX_DELAY); memcpy(s_v, s_d, sizeof *s_v); s_shown = s_ver; xSemaphoreGive(s_mtx);
         render_all();
-    } else if (s_viewing && s_v->ok) render_bus(s_v);       /* 1초마다 버스 타이머 */
+    } else if (s_viewing && s_v->ok) { render_bus(s_v); render_ret(s_v); }   /* 1초마다 버스·열차 타이머 */
     if (s_det && s_dver != s_dshown) {
         xSemaphoreTake(s_mtx, portMAX_DELAY);
         bool mine = s_dbody_kind == s_det_kind;
@@ -791,14 +881,15 @@ void home_tiles_create(lv_obj_t *tv, lv_obj_t *face)
     load_cfg();
     for (int i = 0; i < NT; i++) {
         s_tile[i] = new_tile(i + 1);
-        switch (i) { case 0: build_stock(s_tile[i]); break; case 1: build_weather(s_tile[i]); break; case 2: build_bus(s_tile[i]); break; default: build_cal(s_tile[i]); }
+        switch (i) { case T_STOCK: build_stock(s_tile[i]); break; case T_WX: build_weather(s_tile[i]); break;
+                     case T_BUS: build_bus(s_tile[i]); break; case T_RET: build_ret(s_tile[i]); break; default: build_cal(s_tile[i]); }
         dots(s_tile[i], i + 1);
         s_msg[i] = lbl(s_tile[i], F20, 0xFFFFFF, "", 40, 200, W - 80, LV_TEXT_ALIGN_CENTER);
         lv_obj_set_style_bg_color(s_msg[i], lv_color_black(), 0); lv_obj_set_style_bg_opa(s_msg[i], 200, 0);
         lv_obj_set_style_pad_ver(s_msg[i], 14, 0); lv_obj_set_style_radius(s_msg[i], 16, 0);
     }
-    lv_obj_add_event_cb(s_tile[0], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);   /* 탭하면 세부 화면 */
-    lv_obj_add_event_cb(s_tile[3], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_tile[T_STOCK], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);   /* 탭하면 세부 화면 */
+    lv_obj_add_event_cb(s_tile[T_CAL], tile_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
     s_wrap = new_tile(NT + 1);
     render_all();
     lv_obj_add_event_cb(tv, tile_cb, LV_EVENT_VALUE_CHANGED, NULL);
